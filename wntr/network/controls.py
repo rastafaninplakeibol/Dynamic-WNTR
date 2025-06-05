@@ -2302,8 +2302,8 @@ class ControlChangeTracker(Observer):
         ----------
         control: ControlBase
         """
-        if len(self._previous_values) != 0:
-            raise RuntimeError('Please call clear_reference_points() before registering more controls')
+        #if len(self._previous_values) != 0:
+        #    raise RuntimeError('Please call clear_reference_points() before registering more controls')
         for action in control.actions():
             if action not in self._actions:
                 self._actions[action] = OrderedSet()

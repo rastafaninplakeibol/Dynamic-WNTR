@@ -1,89 +1,60 @@
-<h1>
-<img src="https://raw.githubusercontent.com/usepa/wntr/main/documentation/_static/logo.jpg" width="375">
-</h1><br>
+# Dynamic-WNTR (Dyn-WNTR)
 
-[![GitHub CI](https://github.com/USEPA/WNTR/actions/workflows/build_tests.yml/badge.svg)](https://github.com/USEPA/WNTR/actions/workflows/build_tests.yml)
-[![Coverage Status](https://coveralls.io/repos/github/USEPA/WNTR/badge.svg?branch=main)](https://coveralls.io/github/USEPA/WNTR?branch=main)
-[![Documentation Status](https://github.com/USEPA/WNTR/actions/workflows/build_deploy_pages.yml/badge.svg)](https://github.com/usepa/wntr/actions/workflows/build_deploy_pages.yml)
+**Dynamic-WNTR** (also known as **Dyn-WNTR**) is an extension of the **WNTR** framework, designed to enable **real-time** and **dynamic simulations** of **water distribution networks (WDNs)**. This version allows for the continuous updating of water network models based on real-time data, providing a flexible and interactive platform for optimization, predictive modeling, and system management.
 
-The Water Network Tool for Resilience (WNTR) is a Python package designed to simulate and 
-analyze resilience of water distribution networks. The software includes capability to:
+### Key Features:
+- **Real-time Simulation**: Unlike traditional simulators, Dynamic-WNTR supports real-time updates, enabling continuous changes to valves, pumps, demands, and network components during the simulation.
+- **Integration with IoT and Digital Twins**: Dynamic-WNTR can integrate real-time IoT sensor data through technologies like LoRaWAN, improving the accuracy and adaptability of water network simulations. This makes it a suitable framework for use in **digital twins** of WDNs, allowing operators to optimize and predict network behavior in real-time.
+- **Dynamic Control and Analysis**: Users can interact with the simulation, adjusting network parameters on the fly. This capability enables dynamic testing of various scenarios, improving decision-making and system resilience.
+- **Machine Learning Integration**: Dynamic-WNTR can work alongside machine learning models, using real-time data to improve predictions and system optimization.
 
-* Generate water network models
-* Modify network structure and operations
-* Add disruptive events including pipe leaks
-* Add response/repair strategies
-* Simulate pressure dependent demand and demand-driven hydraulics
-* Simulate water quality 
-* Evaluate resilience 
-* Visualize results
+### Benefits:
+- **Optimized Resource Management**: By enabling dynamic control and feedback, Dynamic-WNTR helps in managing water resources more efficiently, adjusting parameters like pressure, flow, and demand in real-time.
+- **Improved System Resilience**: Real-time updates and adaptability ensure that the system can respond to operational changes and potential issues as they arise.
 
-For more information, go to https://usepa.github.io/WNTR/ 
+### Installation
 
-Installation
---------------
+To use **Dynamic-WNTR**, you’ll need to clone this repo (anything useful is in the mwntr folder).
 
+### Example: Real-time Simulation with Dynamic Control
 
-The latest release of WNTR can be installed from PyPI or Anaconda using one of the following commands in a command line or PowerShell prompt.
+```python
+import mwntr
 
-* PyPI [![version](https://img.shields.io/pypi/v/wntr.svg?maxAge=3600)](https://pypi.org/project/wntr/) [![Downloads](https://static.pepy.tech/badge/wntr)](https://pepy.tech/project/wntr)
+# Initialize the model and simulation
+wn = wntr.network.WaterNetworkModel()
+wn.add_reservoir('R1', base_head=100.0)
+wn.add_junction('J1', base_demand=10.0)
+wn.add_pipe('P1', start_node_name='R1', end_node_name='J1', length=100, diameter=0.3)
 
-  ``pip install wntr``
-  
-* Anaconda [![version](https://anaconda.org/conda-forge/wntr/badges/version.svg)](https://anaconda.org/conda-forge/wntr) [![downloads](https://anaconda.org/conda-forge/wntr/badges/downloads.svg)](https://anaconda.org/conda-forge/wntr)
+# Create a simulation object
+sim = DynWNTRSimulator(wn)
+sim.init_simulation()
 
-  ``conda install -c conda-forge wntr``
-  
-See [installation instructions](https://usepa.github.io/WNTR/installation.html) for more details.
+# Modify the system dynamically
+sim.start_leak('J1')  # Introduce a leak at J1
+sim.step_sim()  # Run the simulation for one timestep
+sim.stop_leak('J1')  # Stop the leak after one timestep
+```
 
-Citing WNTR
------------------
+### Contribution
 
-To cite WNTR, use one of the following references:
+We welcome contributions to improve and expand the functionality of **Dynamic-WNTR**. Feel free to fork the repository, submit issues, or open pull requests with new features or bug fixes. Contributions can help us make the platform more scalable, user-friendly, and adaptable to real-world applications.
 
-* Klise, K.A., Hart, D.B., Bynum, M., Hogge, J., Haxton, T., Murray, R., Burkhardt, J. (2020). Water Network Tool for Resilience (WNTR) User Manual: Version 0.2.3. U.S. EPA Office of Research and Development, Washington, DC, EPA/600/R-20/185, 82p.
+### Future Work
 
-* Klise, K.A., Murray, R., Haxton, T. (2018). An overview of the Water Network Tool for Resilience (WNTR), In Proceedings of the 1st International WDSA/CCWI Joint Conference, Kingston, Ontario, Canada, July 23-25, 075, 8p.
+1. **Integration with Machine Learning**:  
+   We plan to integrate **reinforcement learning (RL)** models for optimizing system management decisions, such as valve control and demand adjustment.
 
-* Klise, K.A., Bynum, M., Moriarty, D., Murray, R. (2017). A software framework for assessing the resilience of drinking water systems to disasters with an example earthquake case study, Environmental Modelling and Software, 95, 420-431, doi: 10.1016/j.envsoft.2017.06.022
+2. **Expansion to Larger Networks**:  
+   Additional work will focus on improving the scalability of **Dynamic-WNTR**, ensuring it can efficiently simulate large-scale water distribution networks with real-time updates.
 
+3. **Digital Twin Integration**:  
+   The future direction includes expanding **Dynamic-WNTR**'s ability to interface with real-world sensor data, enhancing the effectiveness of **digital twins** and predictive maintenance.
 
+4. **Merge into WNTR official repository**
+   The plan is to merge this fork into the original project to enhance the capabilities of WNTR itself.
 
-License
-------------
+### License
 
-WNTR is released under the Revised BSD license. See 
-[LICENSE.md](https://github.com/USEPA/WNTR/blob/main/LICENSE.md) for more details.
-
-Organization
-------------
-
-Directories
-  * wntr - Python package
-  * documentation - User manual
-  * examples - Examples and network files
-  
-Contact
---------
-
-   * Katherine Klise, Sandia National Laboratories, kaklise@sandia.gov
-   * Terra Haxton, US Environmental Protection Agency, haxton.terra@epa.gov
-   * Regan Murray, US Environmental Protection Agency, murray.regan@epa.gov
-
-EPA Disclaimer
------------------
-
-The United States Environmental Protection Agency (EPA) GitHub project code is provided on an "as is" 
-basis and the user assumes responsibility for its use. EPA has relinquished control of the information and 
-no longer has responsibility to protect the integrity , confidentiality, or availability of the information. Any 
-reference to specific commercial products, processes, or services by service mark, trademark, manufacturer, 
-or otherwise, does not constitute or imply their endorsement, recommendation or favoring by EPA. The EPA 
-seal and logo shall not be used in any manner to imply endorsement of any commercial product or activity 
-by EPA or the United States Government.
-
-Sandia Funding Statement
---------------------------------
-
-Sandia National Laboratories is a multimission laboratory managed and operated by National Technology and 
-Engineering Solutions of Sandia, LLC., a wholly owned subsidiary of Honeywell International, Inc., for the 
-U.S. Department of Energy's National Nuclear Security Administration under contract DE-NA-0003525.
+**Dynamic-WNTR** is open-source and distributed under the [MIT License](LICENSE). 
