@@ -57,4 +57,4 @@ We welcome contributions to improve and expand the functionality of **Dynamic-WN
 
 ### License
 
-**Dynamic-WNTR** is open-source and distributed under the [MIT License](LICENSE). 
+**Dynamic-WNTR** is open-source and distributed under the same WNTR license which can be found in the original README.md. 
