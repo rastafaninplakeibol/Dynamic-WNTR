@@ -333,8 +333,28 @@ def plot_interactive_network(wn, node_attribute=None, node_attribute_name = 'Val
     else:
         add_colorbar = False
         
+
+
+    edge_traces = []
     # Create edge trace
-    edge_trace = plotly.graph_objs.Scatter(
+    
+    edge_colors = {
+        "Pipe": '#888',
+        "Pump": 'red',
+        "Valve": 'green'
+    }
+
+    annotations = []
+    edges = G.edges()
+    for edge in G.edges():
+        edge_type = list(edges._adjdict[edge[0]][edge[1]].values())[0]['type']
+        start_node = G.nodes[edge[0]]
+        end_node = G.nodes[edge[1]]
+
+        x0, y0 = start_node['pos']
+        x1, y1 = end_node['pos']
+
+        edge_trace = plotly.graph_objs.Scatter(
         x=[], 
         y=[], 
         text=[],
@@ -343,28 +363,84 @@ def plot_interactive_network(wn, node_attribute=None, node_attribute_name = 'Val
         line=dict(
             #colorscale=link_cmap,
             #reversescale=reverse_colormap,
-            color='#888', #[], 
+            color=edge_colors[edge_type], #[], 
             width=link_width))
-    for edge in G.edges():
-        x0, y0 = G.nodes[edge[0]]['pos']
-        x1, y1 = G.nodes[edge[1]]['pos']
+        
         edge_trace['x'] += tuple([x0, x1, None])
         edge_trace['y'] += tuple([y0, y1, None])
-#        try:
-#            # Add link attributes
-#            link_name = G[edge[0]][edge[1]].keys()[0]
-#            edge_trace['line']['color'] += tuple([pipe_attr[link_name]])
-#            edge_info = 'Edge ' + str(link_name)
-#            edge_trace['text'] += tuple([edge_info])
-#        except:
-#            pass
-#    edge_trace['colorbar']['title'] = 'Link colorbar title'
+
+        mx, my = (x0 + x1)/2, (y0 + y1)/2    
+        link_name = list(G[edge[0]][edge[1]].keys())[0]
+        
+        if link_labels:
+            annotations.append(
+                dict(
+                    x=mx, y=my,
+                    xref='x', yref='y',
+                    text=link_name,
+                    showarrow=False,
+                    bgcolor='#e5ecf6'
+                )
+            )
+        edge_traces.append(edge_trace)
+
+        #try:
+        #    # Add link attributes
+        #    link_name = G[edge[0]][edge[1]].keys()[0]
+        #    #edge_trace['line']['color'] += tuple([pipe_attr[link_name]])
+        #    edge_info = 'Edge ' + str(link_name)
+        #    edge_trace['text'] += tuple([edge_info])
+        #except:
+        #    pass
+    #edge_trace['colorbar']['title'] = 'Link colorbar title'
     
-    # Create node trace      
+    # Create node trace
+    x_list = []
+    y_list = []
+    colors = []
+    texts = []
+    node_colors = {
+        'Reservoir': "blue",
+        'Tank': "green",
+        'Junction': "#555"
+    }
+    
+
+    for node in G.nodes():
+        node_elem = G.nodes[node]
+        color = node_colors[node_elem["type"]]
+        x, y = node_elem['pos']
+        x_list.append(x)
+        y_list.append(y)
+        #try:
+        # Add node attributes
+        colors.append(color)
+        #node_trace['marker']['color'] += tuple([node_attribute[node]])
+        #node_trace['marker']['size'].append(node_size)
+
+        # Add node labels
+        if node_labels:
+            node_info = wn.get_node(node).node_type + ': ' + str(node) + '<br>'
+            #+ node_attribute_name + ': ' + str(round(node_attribute[node],round_ndigits))
+            if add_to_node_popup is not None:
+                if node in add_to_node_popup.index:
+                    for key, val in add_to_node_popup.loc[node].iteritems():
+                        node_info = node_info + '<br>' + \
+                            key + ': ' + '{:.{prec}f}'.format(val, prec=round_ndigits)
+                        
+            texts.append(node_info)
+        #except:
+        #    colors.append('#555')
+        #    if node_labels:
+        #        node_info = wn.get_node(node).node_type + ': ' + str(node)
+        #        texts.append(node_info)
+            #node_trace['marker']['size'] += tuple([5])
+    #node_trace['marker']['colorbar']['title'] = 'Node colorbar title'
+
     node_trace = plotly.graph_objs.Scatter(
-        x=[], 
-        y=[], 
-        text=[],
+        x=x_list, 
+        y=y_list, 
+        text=texts,
         hoverinfo='text',
         mode='markers', 
         marker=dict(
@@ -373,57 +449,45 @@ def plot_interactive_network(wn, node_attribute=None, node_attribute_name = 'Val
             cmin=node_range[0], # TODO: Not sure this works
             cmax=node_range[1], # TODO: Not sure this works
             reversescale=reverse_colormap,
-            color=[], 
+            color=colors, 
             size=node_size,         
             #opacity=0.75,
             colorbar=dict(
                 thickness=15,
-                xanchor='left',
-                titleside='right'),
+                xanchor='left'),
             line=dict(width=1)))
-    for node in G.nodes():
-        x, y = G.nodes[node]['pos']
-        node_trace['x'] += tuple([x])
-        node_trace['y'] += tuple([y])
-        try:
-            # Add node attributes
-            node_trace['marker']['color'] += tuple([node_attribute[node]])
-            #node_trace['marker']['size'].append(node_size)
 
-            # Add node labels
-            if node_labels:
-                node_info = wn.get_node(node).node_type + ': ' + str(node) + '<br>'+ \
-                            node_attribute_name + ': ' + str(round(node_attribute[node],round_ndigits))
-                if add_to_node_popup is not None:
-                    if node in add_to_node_popup.index:
-                        for key, val in add_to_node_popup.loc[node].iteritems():
-                            node_info = node_info + '<br>' + \
-                                key + ': ' + '{:.{prec}f}'.format(val, prec=round_ndigits)
-                            
-                node_trace['text'] += tuple([node_info])
-        except:
-            node_trace['marker']['color'] += tuple(['#888'])
-            if node_labels:
-                node_info = wn.get_node(node).node_type + ': ' + str(node)
-                
-                node_trace['text'] += tuple([node_info])
-            #node_trace['marker']['size'] += tuple([5])
-    #node_trace['marker']['colorbar']['title'] = 'Node colorbar title'
-    
+
     # Create figure
-    data = [edge_trace, node_trace]
+    edge_traces.append(node_trace)
+
+    autosize = False
+    width = None
+    height = None
+    if figsize is None:
+        autosize = True
+    else:
+        width = figsize[0]
+        height = figsize[1]
+
     layout = plotly.graph_objs.Layout(
                     title=title,
-                    titlefont=dict(size=16),
                     showlegend=False, 
-                    width=figsize[0],
-                    height=figsize[1],
+                    width=width,
+                    height=height,
+                    autosize=autosize,
                     hovermode='closest',
+                    annotations=annotations if link_labels else [],
                     margin=dict(b=20,l=5,r=5,t=40),
                     xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                    yaxis=dict(showgrid=False, zeroline=False, showticklabels=False))
+                    yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                    )
     
-    fig = plotly.graph_objs.Figure(data=data,layout=layout)
+    fig = plotly.graph_objs.Figure(data=edge_traces,layout=layout)
+
+
+    #if link_labels:
+    #    fig.update_layout(annotations=annotations)
     if filename:
         plotly.offline.plot(fig, filename=filename, auto_open=auto_open)  
     else:

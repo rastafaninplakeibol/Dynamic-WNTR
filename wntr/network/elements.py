@@ -287,12 +287,12 @@ class Junction(Node):
         if start_time is not None:
             start_control_action = ControlAction(self, 'leak_status', True)
             control = Control._time_control(wn, start_time, 'SIM_TIME', False, start_control_action)
-            wn.add_control(self._leak_start_control_name, control)
+            wn.add_control(f"{self._leak_start_control_name}{start_time}", control)
 
         if end_time is not None:
             end_control_action = ControlAction(self, 'leak_status', False)
             control = Control._time_control(wn, end_time, 'SIM_TIME', False, end_control_action)
-            wn.add_control(self._leak_end_control_name, control)
+            wn.add_control(f"{self._leak_end_control_name}{end_time}", control)
 
     def remove_leak(self,wn):
         """
@@ -1026,6 +1026,10 @@ class Pipe(Link):
             return LinkStatus.Closed
         else:
             return self._user_status
+    @status.setter
+    def status(self, value):
+        self._user_status = value
+        self._internal_status = value
 
     @property
     def friction_factor(self):
@@ -2445,6 +2449,10 @@ class Demands(MutableSequence):
     def clear(self):
         """S.clear() - remove all entries"""
         self._list = []
+    
+    def remove(self, obj):
+        """S.remove(value) - remove first occurrence of value"""
+        self._list.remove(self.to_ts(obj))
 
     def at(self, time, category=None, multiplier=1):
         """Return the total demand at a given time."""
