@@ -99,3 +99,10 @@ wntr/sim/aml/*.dylib
 wntr/sim/network_isolation/*.so
 wntr/sim/network_isolation/*.dll
 wntr/sim/network_isolation/*.dylib
+
+
+pyvenv.cfg
+share
+lib64
+etc
+bin
