@@ -5,6 +5,7 @@ from uuid import uuid4
 from matplotlib import pyplot as plt
 import numpy as np
 import pandas as pd
+import scipy as sp
 import wntr
 from wntr.network.controls import _ControlType
 import wntr.sim.hydraulics
@@ -17,6 +18,8 @@ from wntr.network.model import WaterNetworkModel
 from copy import deepcopy
 import plotly.express as px
 import plotly.graph_objs as go
+import networkx as nx
+
 
 from wntr.sim.core import _Diagnostics, _ValveSourceChecker, _solver_helper
 
@@ -24,7 +27,7 @@ from wntr.sim.core import _Diagnostics, _ValveSourceChecker, _solver_helper
 logger = logging.getLogger(__name__)
 #logger.setLevel(logging.DEBUG)
 
-class DynWNTRSimulator(wntr.sim.WNTRSimulator):
+class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
     def __init__(self, wn: WaterNetworkModel):
         super().__init__(wn)
         self.initialized_simulation = False
@@ -32,6 +35,7 @@ class DynWNTRSimulator(wntr.sim.WNTRSimulator):
         self._sim_id = f"{uuid4()}"
         self.events_history = []
         self._timestep_index = 0
+        self._convergence_error = True
 
     def hydraulic_timestep(self):
         return self._hydraulic_timestep
@@ -56,7 +60,7 @@ class DynWNTRSimulator(wntr.sim.WNTRSimulator):
 
         return new_pattern
 
-    def init_simulation(self, solver=None, backup_solver=None, solver_options=None, backup_solver_options=None, convergence_error=False, HW_approx='default', diagnostics=False, global_timestep=60, duration=86400):
+    def init_simulation(self, solver=None, backup_solver=None, solver_options=None, backup_solver_options=None, convergence_error=True, HW_approx='default', diagnostics=False, global_timestep=60, duration=86400):
         logger.debug('creating hydraulic model')
         self.mode = self._wn.options.hydraulic.demand_model
         self._model, self._model_updater = wntr.sim.hydraulics.create_hydraulic_model(wn=self._wn, HW_approx=HW_approx)
@@ -148,138 +152,206 @@ class DynWNTRSimulator(wntr.sim.WNTRSimulator):
             self.node_res['expected_demand'][node_name].append(0.0)
             self.node_res['satisfied_demand'][node_name].append(1.0)
 
-    def step_sim(self):
-        if not self.initialized_simulation:
-            raise RuntimeError('Simulation not initialized. Call init_simulation() before running the simulation.')
-        if self._terminated:
-            return
+    def _open_links_graph(self) -> nx.Graph:
+        G = nx.Graph()
+        for n, _ in self._wn.nodes():
+            G.add_node(n)
+        for name, link in self._wn.links():
+            # only currently open/active links
+            if getattr(link, "status", LinkStatus.Open) != LinkStatus.Closed:
+                G.add_edge(link.start_node_name, link.end_node_name, key=name)
+        return G
 
-        if self._wn.sim_time == 0:
-            first_step = True
+    def _unserved_junctions(self):
+        G = self._open_links_graph()
+        sources = set(self._wn.reservoir_name_list + self._wn.tank_name_list)
+        served = set()
+        for s in sources:
+            if s in G:
+                served |= set(nx.node_connected_component(G, s))
+        return [j for j in self._wn.junction_name_list if j not in served]
+
+    def _jacobian_info(self):
+        try:
+            self._model.set_structure()
+            J = self._model.evaluate_jacobian(x=None)
+            if not sp.sparse.issparse(J):
+                return "Jacobian is dense with shape {}".format(np.shape(J))
+            nnz = J.nnz
+            shape = J.shape
+            # crude singularity signal: try spsolve on a random RHS and catch warnings
+            try:
+                _ = sp.sparse.linalg.spsolve(J.tocsc(), np.ones(shape[0]))
+                msg = "Jacobian ok, shape={}, nnz={}".format(shape, nnz)
+            except Exception as e:
+                msg = "Jacobian solve failed: {} | shape={}, nnz={}".format(e, shape, nnz)
+            return msg
+        except Exception as e:
+            return f"Jacobian diagnostics failed: {e}"
+
+    def _param_sanity(self):
+        bad = []
+        for name, p in self._wn.pipes():
+            if getattr(p, "length", 1.0) <= 0:
+                bad.append(f"{name}: length<=0")
+            if getattr(p, "diameter", 1.0) <= 0:
+                bad.append(f"{name}: diameter<=0")
+            C = getattr(p, "roughness", 100.0)
+            if C <= 0 or C > 1000:
+                bad.append(f"{name}: roughness={C}")
+        return bad
+
+    def _log_failure_context(self, mesg: str):
+        unserved = self._unserved_junctions()
+        if unserved:
+            print(f"Time {self._get_time()} — {len(unserved)} junctions disconnected from sources "
+                         f"(first 20): {unserved[:20]}")
         else:
-            first_step = False
+            print(f"Time {self._get_time()} — all junctions connected to a source.")
 
-        if not self.resolve:
-            if not first_step:
-                """
-                The tank levels/heads must be done before checking the controls because the TankLevelControls
-                depend on the tank levels. These will be updated again after we determine the next actual timestep.
-                """
+        bad = self._param_sanity()
+        if bad:
+            print("Suspicious pipe parameters (first 20): " + "; ".join(bad[:20]))
+        print("Solver message: " + mesg)
+        print(self._jacobian_info())
+
+    def step_sim(self):
+        try:
+            if not self.initialized_simulation:
+                raise RuntimeError('Simulation not initialized. Call init_simulation() before running the simulation.')
+            if self._terminated:
+                return
+            if self._wn.sim_time == 0:
+                first_step = True
+            else:
+                first_step = False
+
+            if not self.resolve:
+                if not first_step:
+                    """
+                    The tank levels/heads must be done before checking the controls because the TankLevelControls
+                    depend on the tank levels. These will be updated again after we determine the next actual timestep.
+                    """
+                    wntr.sim.hydraulics.update_tank_heads(self._wn)
+                self.trial = 0
+                self._compute_next_timestep_and_run_presolve_controls_and_rules(first_step)
+
+            self._run_feasibility_controls()
+
+            if len(self.demand_modifications) > 0:
+                self._apply_demand_modifications()
+
+            if len(self.tank_head_modifications) > 0:
+                for tank_name, head in self.tank_head_modifications:
+                    tank = self._wn.get_node(tank_name)
+                    #head = elevation + level
+                    #max_level = head - elevation
+                    if tank.max_level < (head - tank.elevation):
+                        raise ValueError(f"Tank {tank_name} max level {tank.max_level} is less than {head - tank.elevation}, change max_level before calling init_simulation")
+                    tank._head = head
+                    tank._prev_head = head
+                self.tank_head_modifications.clear()
+                
+
+            if self.rebuild_hydraulic_model:
+                self._model, self._model_updater = wntr.sim.hydraulics.create_hydraulic_model(wn=self._wn, HW_approx=self._hw_approx)
+                self.rebuild_hydraulic_model = False
+                
+            # Prepare for solve
+            isolated_junctions, isolated_links = self._get_isolated_junctions_and_links()
+            num_isolated_junctions, num_isolated_links = len(isolated_junctions), len(isolated_links)
+            if not first_step and not self.resolve:
                 wntr.sim.hydraulics.update_tank_heads(self._wn)
-            self.trial = 0
-            self._compute_next_timestep_and_run_presolve_controls_and_rules(first_step)
-
-        self._run_feasibility_controls()
-
-        # Prepare for solve
-        self._update_internal_graph()
-        num_isolated_junctions, num_isolated_links = self._get_isolated_junctions_and_links()
-        if not first_step and not self.resolve:
-            wntr.sim.hydraulics.update_tank_heads(self._wn)
-        wntr.sim.hydraulics.update_model_for_controls(self._model, self._wn, self._model_updater, self._change_tracker)
-        wntr.sim.models.param.source_head_param(self._model, self._wn)
-        wntr.sim.models.param.expected_demand_param(self._model, self._wn)
-
-        self.diagnostics.run(last_step='presolve controls, rules, and model updates', next_step='solve')
-
-        solver_status, mesg, iter_count = _solver_helper(self._model, self._solver, self._solver_options)
-        if solver_status == 0 and self._backup_solver is not None:
-            solver_status, mesg, iter_count = _solver_helper(self._model, self._backup_solver, self._backup_solver_options)
-        if solver_status == 0:
-            if self._convergence_error:
-                logger.error('Simulation did not converge at time ' + self._get_time() + '. ' + mesg) 
-                raise RuntimeError('Simulation did not converge at time ' + self._get_time() + '. ' + mesg)
-            warnings.warn('Simulation did not converge at time ' + self._get_time() + '. ' + mesg)
-            logger.warning('Simulation did not converge at time ' + self._get_time() + '. ' + mesg)
-            self.results.error_code = wntr.sim.results.ResultsStatus.error
-            self.diagnostics.run(last_step='solve', next_step='break')
-            self._terminated = True
-            self.get_results()
-            return
-
-        logger.info('{0:<10}{1:<10}{2:<10}{3:<15}{4:<15}'.format(self._get_time(), self.trial, iter_count, num_isolated_junctions, num_isolated_links))
-
-        # Enter results in network and update previous inputs
-        logger.debug('storing results in network')
-        wntr.sim.hydraulics.store_results_in_network(self._wn, self._model)
-
-        self.diagnostics.run(last_step='solve and store results in network', next_step='postsolve controls')
-
-        self._run_postsolve_controls()
-        self._run_feasibility_controls()
-        if self._change_tracker.changes_made(ref_point='graph'):
-            self.resolve = True
-            self._update_internal_graph()
             wntr.sim.hydraulics.update_model_for_controls(self._model, self._wn, self._model_updater, self._change_tracker)
-            self.diagnostics.run(last_step='postsolve controls and model updates', next_step='solve next trial')
-            self.trial += 1
-            if self.trial > self.max_trials:
+            wntr.sim.models.param.source_head_param(self._model, self._wn)
+            wntr.sim.models.param.expected_demand_param(self._model, self._wn)
+
+            
+            self.diagnostics.run(last_step='presolve controls, rules, and model updates', next_step='solve')
+
+            solver_status, mesg, iter_count = _solver_helper(self._model, self._solver, self._solver_options)
+            if solver_status == 0 and self._backup_solver is not None:
+                solver_status, mesg, iter_count = _solver_helper(self._model, self._backup_solver, self._backup_solver_options)
+            if solver_status == 0:
+                self._log_failure_context(mesg)
                 if self._convergence_error:
-                    logger.error('Exceeded maximum number of trials at time ' + self._get_time() + '. ') 
-                    raise RuntimeError('Exceeded maximum number of trials at time ' + self._get_time() + '. ' ) 
+                    logger.error('Simulation did not converge at time ' + self._get_time() + '. ' + mesg) 
+                    raise RuntimeError('Simulation did not converge at time ' + self._get_time() + '. ' + mesg)
+                warnings.warn('Simulation did not converge at time ' + self._get_time() + '. ' + mesg)
+                logger.warning('Simulation did not converge at time ' + self._get_time() + '. ' + mesg)
                 self.results.error_code = wntr.sim.results.ResultsStatus.error
-                warnings.warn('Exceeded maximum number of trials at time ' + self._get_time() + '. ') 
-                logger.warning('Exceeded maximum number of trials at time ' + self._get_time() + '. ' ) 
+                self.diagnostics.run(last_step='solve', next_step='break')
                 self._terminated = True
+                self.get_results()
+                return
+
+            logger.info('{0:<10}{1:<10}{2:<10}{3:<15}{4:<15}'.format(self._get_time(), self.trial, iter_count, num_isolated_junctions, num_isolated_links))
+
+            # Enter results in network and update previous inputs
+            logger.debug('storing results in network')
+            wntr.sim.hydraulics.store_results_in_network(self._wn, self._model)
+
+            self.diagnostics.run(last_step='solve and store results in network', next_step='postsolve controls')
+
+            self._run_postsolve_controls()
+            self._run_feasibility_controls()
+            if self._change_tracker.changes_made(ref_point='graph'):
+                self.resolve = True
+                self._update_internal_graph()
+                wntr.sim.hydraulics.update_model_for_controls(self._model, self._wn, self._model_updater, self._change_tracker)
+                self.diagnostics.run(last_step='postsolve controls and model updates', next_step='solve next trial')
+                self.trial += 1
+                if self.trial > self.max_trials:
+                    if self._convergence_error:
+                        logger.error('Exceeded maximum number of trials at time ' + self._get_time() + '. ') 
+                        raise RuntimeError('Exceeded maximum number of trials at time ' + self._get_time() + '. ' ) 
+                    self.results.error_code = wntr.sim.results.ResultsStatus.error
+                    warnings.warn('Exceeded maximum number of trials at time ' + self._get_time() + '. ') 
+                    logger.warning('Exceeded maximum number of trials at time ' + self._get_time() + '. ' ) 
+                    self._terminated = True
+                    #self._set_results(self._wn, self.results, self.node_res, self.link_res)
+                    return
+                self._terminated = False
                 #self._set_results(self._wn, self.results, self.node_res, self.link_res)
                 return
-            self._terminated = False
-            #self._set_results(self._wn, self.results, self.node_res, self.link_res)
-            return
 
-        self.diagnostics.run(last_step='postsolve controls and model updates', next_step='advance time')
+            self.diagnostics.run(last_step='postsolve controls and model updates', next_step='advance time')
 
-        logger.debug('no changes made by postsolve controls; moving to next timestep')
+            logger.debug('no changes made by postsolve controls; moving to next timestep')
 
-        self.resolve = False
-        if isinstance(self._report_timestep, (float, int)):
-            if self._wn.sim_time % self._report_timestep == 0:
+            self.resolve = False
+            if isinstance(self._report_timestep, (float, int)):
+                if self._wn.sim_time % self._report_timestep == 0:
+                    wntr.sim.hydraulics.save_results(self._wn, self.node_res, self.link_res)
+                    self._save_expected_demand()
+
+                    if len(self.results.time) > 0 and int(self._wn.sim_time) == self.results.time[-1]:
+                        if int(self._wn.sim_time) != self._wn.sim_time:
+                            raise RuntimeError('Time steps increments smaller than 1 second are forbidden.'+
+                                                ' Keep time steps as an integer number of seconds.')
+                        else:
+                            raise RuntimeError('Simulation already solved this timestep')
+                    self.results.time.append(int(self._wn.sim_time))
+            elif self._report_timestep.upper() == 'ALL':
                 wntr.sim.hydraulics.save_results(self._wn, self.node_res, self.link_res)
                 self._save_expected_demand()
 
                 if len(self.results.time) > 0 and int(self._wn.sim_time) == self.results.time[-1]:
-                    if int(self._wn.sim_time) != self._wn.sim_time:
-                        raise RuntimeError('Time steps increments smaller than 1 second are forbidden.'+
-                                            ' Keep time steps as an integer number of seconds.')
-                    else:
-                        raise RuntimeError('Simulation already solved this timestep')
+                    raise RuntimeError('Simulation already solved this timestep')
                 self.results.time.append(int(self._wn.sim_time))
-        elif self._report_timestep.upper() == 'ALL':
-            wntr.sim.hydraulics.save_results(self._wn, self.node_res, self.link_res)
-            self._save_expected_demand()
-
-            if len(self.results.time) > 0 and int(self._wn.sim_time) == self.results.time[-1]:
-                raise RuntimeError('Simulation already solved this timestep')
-            self.results.time.append(int(self._wn.sim_time))
-        wntr.sim.hydraulics.update_network_previous_values(self._wn)
-        
-        self._wn.sim_time += self._hydraulic_timestep
-        #overstep = float(self._wn.sim_time) % self._hydraulic_timestep
-        #self._wn.sim_time -= overstep
-
-        if len(self.demand_modifications) > 0:
-            self._apply_demand_modifications()
-
-        if len(self.tank_head_modifications) > 0:
-            for tank_name, head in self.tank_head_modifications:
-                tank = self._wn.get_node(tank_name)
-                #head = elevation + level
-                #max_level = head - elevation
-                if tank.max_level < (head - tank.elevation):
-                    raise ValueError(f"Tank {tank_name} max level {tank.max_level} is less than {head - tank.elevation}, change max_level before calling init_simulation")
-                tank._head = head
-                tank._prev_head = head
-            self.tank_head_modifications.clear()
+            wntr.sim.hydraulics.update_network_previous_values(self._wn)
             
+            self._wn.sim_time += self._hydraulic_timestep
+            #overstep = float(self._wn.sim_time) % self._hydraulic_timestep
+            #self._wn.sim_time -= overstep
+            
+            if self._wn.sim_time > self._wn.options.time.duration:
+                self._terminated = True
+            return
+        except Exception as e:
+            logger.exception('Error during simulation step at time ' + self._get_time() + '. ' + str(e))
+            raise e
 
-        if self.rebuild_hydraulic_model:
-            self._model, self._model_updater = wntr.sim.hydraulics.create_hydraulic_model(wn=self._wn, HW_approx=self._hw_approx)
-            self.rebuild_hydraulic_model = False
-        
-        if self._wn.sim_time > self._wn.options.time.duration:
-            self._terminated = True
-        return
-        
     def full_run_sim(self):
         if not self.initialized_simulation:
             raise RuntimeError('Simulation not initialized. Call init_simulation() before running the simulation')
@@ -290,37 +362,12 @@ class DynWNTRSimulator(wntr.sim.WNTRSimulator):
     def is_terminated(self):
         return self._terminated
     
-    def _set_results_old(self):
-        """
-        Parameters
-        ----------
-        wn: wntr.network.WaterNetworkModel
-        results: wntr.sim.results.SimulationResults
-        node_res: OrderedDict
-        link_res: OrderedDict
-        """
-        node_names = self._wn.junction_name_list + self._wn.tank_name_list + self._wn.reservoir_name_list
-        link_names = self._wn.pipe_name_list + self._wn.head_pump_name_list + self._wn.power_pump_name_list + self._wn.valve_name_list
-
-        self.last_set_results_time = self._wn.sim_time
-
-        self.results.node = {}
-        self.results.link = {}
-
-        for key, _ in self.node_res.items():
-            data = [self.node_res[key][name] for name in node_names]
-            self.results.node[key] = pd.DataFrame(data=np.array(data).transpose(), index=self.results.time,
-                                        columns=node_names)
-
-        for key, _ in self.link_res.items():
-            self.results.link[key] = pd.DataFrame(data=np.array([self.link_res[key][name] for name in link_names]).transpose(), index=self.results.time,
-                                                columns=link_names)
-
     def _set_results(self):
         """
         Ensures all missing timesteps between the last recorded timestep and the current simulation time
         are stored without gaps.
         """
+
         node_names = self._wn.junction_name_list + self._wn.tank_name_list + self._wn.reservoir_name_list
         link_names = self._wn.pipe_name_list + self._wn.head_pump_name_list + self._wn.power_pump_name_list + self._wn.valve_name_list
 
@@ -391,20 +438,22 @@ class DynWNTRSimulator(wntr.sim.WNTRSimulator):
     def _close_link(self, link_name) -> None:
         link = self._wn.get_link(link_name)
         c1 = wntr.network.controls.ControlAction(link, "status", LinkStatus.Closed)
-        condition = wntr.network.controls.SimTimeCondition(self._wn, "=", self.get_sim_time() + self.hydraulic_timestep())
+        condition = wntr.network.controls.SimTimeCondition(self._wn, None, self.get_sim_time()) #+ self.hydraulic_timestep() )
         c = wntr.network.controls.Control(condition=condition, then_action=c1) 
         self._add_control(c)
         self._register_controls_with_observers()
-        self.rebuild_hydraulic_model = True
+        #link.initial_status = LinkStatus.Closed
+        #self.rebuild_hydraulic_model = True
 
     def _open_link(self, link_name):
         link = self._wn.get_link(link_name)
         c1 = wntr.network.controls.ControlAction(link, "status", LinkStatus.Open)
-        condition = wntr.network.controls.SimTimeCondition(self._wn, "=", self.get_sim_time()  + self.hydraulic_timestep())
+        condition = wntr.network.controls.SimTimeCondition(self._wn, None, self.get_sim_time()) #+ self.hydraulic_timestep() )
         c = wntr.network.controls.Control(condition=condition, then_action=c1)
         self._add_control(c)
         self._register_controls_with_observers()
-        self.rebuild_hydraulic_model = True
+        #link.initial_status = LinkStatus.Open
+        #self.rebuild_hydraulic_model = True
 
     def close_pipe(self, pipe_name) -> None:
         self.events_history.append((self.get_sim_time(), 'close_pipe', (pipe_name)))
@@ -462,8 +511,8 @@ class DynWNTRSimulator(wntr.sim.WNTRSimulator):
         pump.base_speed = speed
         #self.rebuild_hydraulic_model = True
 
-    def plot_network(self, title='Water Network Map', node_labels=True, link_labels=True):
-        wntr.graphics.plot_interactive_network(self._wn, title=f"{title} - {self._sim_id}", node_labels=node_labels, link_labels=link_labels)    
+    def plot_network(self, title='Water Network Map', node_labels=True, link_labels=True, figsize=[1920, 1080]):
+        wntr.graphics.plot_interactive_network(self._wn, title=f"{title} - {self._sim_id}", node_labels=node_labels, link_labels=link_labels, figsize=figsize)
 
     def _create_base_figure(self, node_positions, edge_list, node_color_0, edge_color_0,
                         node_hover_0, edge_hover_0, edge_names, node_key, link_key, node_max_value, node_min_value, link_min_value, link_max_value, node_labels=True, link_labels=True):
@@ -1036,8 +1085,9 @@ class DynWNTRSimulator(wntr.sim.WNTRSimulator):
  
         return value, has_feature
 
-    def extract_snapshot(self, filename=None):
+    def extract_snapshot(self, scale_value=False, filename=None):
 
+        results = self.get_results()  # Ensure results are up to date
         nodes = self._wn.nodes._data.values()
         edges = self._wn.links._data.values()
 
@@ -1047,16 +1097,17 @@ class DynWNTRSimulator(wntr.sim.WNTRSimulator):
             'edges': {},
         }
 
-        type_map = {
-            'Junction':  [1, 0, 0, 0, 0, 0],
-            'Tank':      [0, 1, 0, 0, 0, 0],
-            'Reservoir': [0, 0, 1, 0, 0, 0],
-            'Pipe':      [0, 0, 0, 1, 0, 0],
-            'Pump':      [0, 0, 0, 0, 1, 0],
-            'Valve':     [0, 0, 0, 0, 0, 1],
+        node_type_map = {
+            'Junction':  [1, 0, 0],
+            'Tank':      [0, 1, 0],
+            'Reservoir': [0, 0, 1],
         }
-
         
+        edge_type_map = {
+            'Pipe':      [1, 0, 0],
+            'Pump':      [0, 1, 0],
+            'Valve':     [0, 0, 1],
+        }
 
         nodes_features = ['demand', 'elevation', 'head', 'leak_status', 'leak_area',
                         'leak_discharge_coeff', 'leak_demand', 'pressure', 'diameter',
@@ -1066,14 +1117,23 @@ class DynWNTRSimulator(wntr.sim.WNTRSimulator):
         nodes_always_valued_features = ["demand", "head", "leak_area", "leak_demand", "leak_discharge_coeff", "leak_status", "pressure"]
         edges_always_valued_features = ['flow']
 
-        feature_ranges = self._compute_feature_ranges(nodes_features, edges_features)
+        feature_ranges = self._compute_feature_ranges(nodes_features, edges_features) if scale_value else {}
 
         for n in nodes:
             node_data = {}
         
             for feature in nodes_features:
                 value = getattr(n, feature, -1)
-                scaled_value, has_feature = self._scale(value, feature, feature_ranges)
+                
+                scaled_value = value
+                has_feature = 0
+                if scale_value:
+                    scaled_value, has_feature = self._scale(value, feature, feature_ranges) 
+                elif value is not None and value != -1:
+                    has_feature = 1
+                else:
+                    scaled_value = -1
+
                 node_data[feature] = scaled_value
                 if feature not in nodes_always_valued_features:
                     node_data[f'has_{feature}'] = has_feature
@@ -1088,7 +1148,10 @@ class DynWNTRSimulator(wntr.sim.WNTRSimulator):
                 node_data['setting'] = -1
                 node_data['has_setting'] = 0
             
-            node_data['node_type'] = type_map[n.node_type]
+            node_data['expected_demand'] = results.node['expected_demand'][n.name].iloc[-1]
+            node_data['satisfied_demand'] = results.node['satisfied_demand'][n.name].iloc[-1]
+            
+            node_data['node_type'] = node_type_map[n.node_type]
 
             snapshot['nodes'][n.name] = node_data
 
@@ -1126,7 +1189,7 @@ class DynWNTRSimulator(wntr.sim.WNTRSimulator):
                 edge_data['status'] = 1
             
 
-            edge_data['link_type'] = type_map[l.link_type]  
+            edge_data['link_type'] = edge_type_map[l.link_type]  
             edge_data['start'] = l.start_node_name
             edge_data['end'] = l.end_node_name
 
@@ -1208,7 +1271,6 @@ class DynWNTRSimulator(wntr.sim.WNTRSimulator):
 
         max_error = np.max(np.abs(conservation))
         print(f"Max imbalance at any node: {max_error}")
-
 
     def dump_results_to_csv(self):
         results = self.get_results()

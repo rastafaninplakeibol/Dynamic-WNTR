@@ -257,7 +257,7 @@ def plot_network(wn, node_attribute=None, link_attribute=None, title=None,
 def plot_interactive_network(wn, node_attribute=None, node_attribute_name = 'Value', title=None,
                node_size=8, node_range=[None,None], node_cmap='Jet', node_labels=True, link_labels=False,
                link_width=1, add_colorbar=True, reverse_colormap=False,
-               figsize=[700, 450], round_ndigits=2, add_to_node_popup=None, 
+               figsize=[1200, 800], round_ndigits=2, add_to_node_popup=None, 
                filename='plotly_network.html', auto_open=True):
     """
     Create an interactive scalable network graphic using plotly. 
