@@ -1,3 +1,4 @@
+import itertools
 import json
 import math
 import os
@@ -135,7 +136,8 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
         logger.info('{0:<10}{1:<10}{2:<10}{3:<15}{4:<15}'.format('Sim Time', 'Trial', 'Solver', '# isolated', '# isolated'))
         logger.info('{0:<10}{1:<10}{2:<10}{3:<15}{4:<15}'.format('', '', '# iter', 'junctions', 'links'))
 
-    def _save_expected_demand(self):
+
+    def _save_expected_demand_and_leak(self):
         expected_demand = self._model.expected_demand
         for node_name, demand in expected_demand.items():
             v = demand.value
@@ -151,6 +153,22 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
         for node_name, node in self._wn.tanks():
             self.node_res['expected_demand'][node_name].append(0.0)
             self.node_res['satisfied_demand'][node_name].append(1.0)
+
+
+        leak_rate = self._model.leak_rate
+        for node_name, leak in leak_rate.items():
+            v = leak.value
+            self.node_res['expected_leak'][node_name].append(v)
+            if v == 0:
+                self.node_res['satisfied_leak'][node_name].append(1)
+            else:
+                self.node_res['satisfied_leak'][node_name].append(self.node_res['leak_demand'][node_name][-1] / v)  
+
+        for node_name, node in self._wn.reservoirs():
+            self.node_res['expected_leak'][node_name].append(0.0)
+            self.node_res['satisfied_leak'][node_name].append(1.0)
+
+        #tanks already included in leak_rate    
 
     def _open_links_graph(self) -> nx.Graph:
         G = nx.Graph()
@@ -258,6 +276,7 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
                 self.rebuild_hydraulic_model = False
                 
             # Prepare for solve
+            self._update_internal_graph()
             isolated_junctions, isolated_links = self._get_isolated_junctions_and_links()
             num_isolated_junctions, num_isolated_links = len(isolated_junctions), len(isolated_links)
             if not first_step and not self.resolve:
@@ -323,7 +342,7 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
             if isinstance(self._report_timestep, (float, int)):
                 if self._wn.sim_time % self._report_timestep == 0:
                     wntr.sim.hydraulics.save_results(self._wn, self.node_res, self.link_res)
-                    self._save_expected_demand()
+                    self._save_expected_demand_and_leak()
 
                     if len(self.results.time) > 0 and int(self._wn.sim_time) == self.results.time[-1]:
                         if int(self._wn.sim_time) != self._wn.sim_time:
@@ -334,7 +353,7 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
                     self.results.time.append(int(self._wn.sim_time))
             elif self._report_timestep.upper() == 'ALL':
                 wntr.sim.hydraulics.save_results(self._wn, self.node_res, self.link_res)
-                self._save_expected_demand()
+                self._save_expected_demand_and_leak()
 
                 if len(self.results.time) > 0 and int(self._wn.sim_time) == self.results.time[-1]:
                     raise RuntimeError('Simulation already solved this timestep')
@@ -934,6 +953,16 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
 
     def sim_id(self):
         return self._sim_id
+    
+    def get_stranded_sources(self):
+        stranded = []
+        for name, _ in itertools.chain(self._wn.tanks(), self._wn.reservoirs()):
+            nid = self._node_name_to_id[name]
+            rs = self._internal_graph.indptr[nid]
+            re = self._internal_graph.indptr[nid + 1]
+            if rs == re or not np.any(self._internal_graph.data[rs:re] != 0):
+                stranded.append(name)
+        return stranded
 
     def branch(self):
         """
@@ -1085,7 +1114,7 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
  
         return value, has_feature
 
-    def extract_snapshot(self, scale_value=False, filename=None):
+    def extract_snapshot(self, scale_values=True, not_scaled_features=[], filename=None):
 
         results = self.get_results()  # Ensure results are up to date
         nodes = self._wn.nodes._data.values()
@@ -1110,14 +1139,14 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
         }
 
         nodes_features = ['demand', 'elevation', 'head', 'leak_status', 'leak_area',
-                        'leak_discharge_coeff', 'leak_demand', 'pressure', 'diameter',
+                        'leak_discharge_coeff', 'leak_demand', 'pressure',
                         'level', 'max_level', 'min_level', 'overflow']
         edges_features = ['base_speed', 'flow', 'headloss', 'roughness', 'velocity', 'diameter']
 
         nodes_always_valued_features = ["demand", "head", "leak_area", "leak_demand", "leak_discharge_coeff", "leak_status", "pressure"]
         edges_always_valued_features = ['flow']
 
-        feature_ranges = self._compute_feature_ranges(nodes_features, edges_features) if scale_value else {}
+        feature_ranges = self._compute_feature_ranges(nodes_features, edges_features) if scale_values else {}
 
         for n in nodes:
             node_data = {}
@@ -1127,7 +1156,7 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
                 
                 scaled_value = value
                 has_feature = 0
-                if scale_value:
+                if scale_values and feature not in not_scaled_features:
                     scaled_value, has_feature = self._scale(value, feature, feature_ranges) 
                 elif value is not None and value != -1:
                     has_feature = 1
@@ -1150,6 +1179,9 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
             
             node_data['expected_demand'] = results.node['expected_demand'][n.name].iloc[-1]
             node_data['satisfied_demand'] = results.node['satisfied_demand'][n.name].iloc[-1]
+
+            node_data['expected_leak'] = results.node['expected_leak'][n.name].iloc[-1]
+            node_data['satisfied_leak'] = results.node['satisfied_leak'][n.name].iloc[-1]
             
             node_data['node_type'] = node_type_map[n.node_type]
 
@@ -1201,7 +1233,263 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
 
         return snapshot
 
-        #def _set_active_valve(self, valve):
+    def restore_from_snapshot(self, snapshot: dict):
+        """
+        Restore the hydraulic network *state* from a snapshot created by extract_snapshot(),
+        so that the next step continues seamlessly as if the simulation never stopped.
+
+        Requirements:
+            - The snapshot must have been produced with scale_value=False.
+
+        Effects:
+            - Restores _wn.sim_time to the snapshot time.
+            - Restores node-level state: head, pressure, demand, leaks, tank levels, etc.
+            - Restores link-level state: status (open/closed), flow, setting/base_speed, etc.
+            - Rebuilds the hydraulic model and re-initializes internal solver structures.
+            - Syncs 'previous' values so the solver starts from a consistent state.
+            - Keeps existing self.results intact and positions indices so new timesteps append.
+
+        Parameters
+        ----------
+        snapshot : dict
+            The dictionary previously returned by extract_snapshot(scale_value=False).
+        """
+        if not self.initialized_simulation:
+            raise RuntimeError("Call init_simulation() before restore_from_snapshot().")
+
+        # ---- 0) Basic checks --------------------------------------------------
+        if 'nodes' not in snapshot or 'edges' not in snapshot or 'time' not in snapshot:
+            raise ValueError("Malformed snapshot: expected keys ['time','nodes','edges'].")
+
+        def _looks_scaled(node_entry):
+            # pressure/head are good canaries; they shouldn't be in [0,1] range for a real network
+            for k in ('pressure', 'head'):
+                v = node_entry.get(k, None)
+                if v is None or v == -1:
+                    continue
+                if 0.0 <= float(v) <= 1.0:
+                    return True
+            return False
+
+        any_scaled = any(_looks_scaled(nd) for nd in snapshot['nodes'].values())
+        if any_scaled:
+            raise ValueError("Snapshot appears scaled. Recreate it with scale_value=False to restore exactly.")
+
+        snap_time = int(snapshot['time'])
+        self._wn.sim_time = snap_time
+
+        for name, nd in snapshot['nodes'].items():
+            node = self._wn.get_node(name)
+
+            def _set_if_present(attr, key):
+                v = nd.get(key, -1)
+                if v is not None and v != -1:
+                    setattr(node, f"_{attr}", float(v))
+                    setattr(node, f"_prev_{attr}", float(v))
+
+            _set_if_present('head', 'head')
+            _set_if_present('pressure', 'pressure')
+            _set_if_present('demand', 'demand')
+
+            if hasattr(node, 'level'):
+                _set_if_present('level', 'level')
+
+            leak_status = nd.get('leak_status', -1)
+            if leak_status != -1:
+                leak_on = bool(leak_status)
+                node._leak_status = leak_on
+                node._leak = leak_on
+            leak_area = nd.get('leak_area', -1)
+            if leak_area != -1:
+                node._leak_area = float(leak_area)
+            leak_cd = nd.get('leak_discharge_coeff', -1)
+            if leak_cd != -1:
+                node._leak_discharge_coeff = float(leak_cd)
+
+            setting = nd.get('setting', -1)
+            if setting != -1 and hasattr(node, 'setting'):
+                try:
+                    node.setting = float(setting)
+                except Exception:
+                    setattr(node, '_setting', float(setting))
+
+        for name, ed in snapshot['edges'].items():
+            link = self._wn.get_link(name)
+
+            flow = ed.get('flow', -1)
+            if flow != -1:
+                link._flow = float(flow)
+                link._prev_flow = float(flow)
+
+            status = ed.get('status', None)
+            if status is not None:
+                if int(status) == 0:
+                    link.status = LinkStatus.Closed
+                else:
+                    link.status = LinkStatus.Open
+
+            setting = ed.get('setting', -1)
+            if setting != -1 and hasattr(link, 'setting'):
+                try:
+                    link.setting = float(setting)
+                except Exception:
+                    setattr(link, '_setting', float(setting))
+
+            base_speed = ed.get('base_speed', -1)
+            if base_speed != -1 and hasattr(link, 'base_speed'):
+                link.base_speed = float(base_speed)
+
+            rough = ed.get('roughness', -1)
+            if rough != -1 and hasattr(link, 'roughness'):
+                link.roughness = float(rough)
+
+            diam = ed.get('diameter', -1)
+            if diam != -1 and hasattr(link, 'diameter'):
+                link.diameter = float(diam)
+
+        self._model, self._model_updater = wntr.sim.hydraulics.create_hydraulic_model(
+            wn=self._wn, HW_approx=self._hw_approx
+        )
+
+        if self.diagnostics_enabled:
+            self.diagnostics = _Diagnostics(self._wn, self._model, self.mode, enable=True)
+        else:
+            self.diagnostics = _Diagnostics(self._wn, self._model, self.mode, enable=False)
+
+        self._initialize_internal_graph()
+        self._change_tracker.set_reference_point('graph')
+        self._change_tracker.set_reference_point('model')
+
+        wntr.sim.hydraulics.update_network_previous_values(self._wn)
+        self._wn._prev_sim_time = snap_time - self._hydraulic_timestep
+
+        self.resolve = False
+        self._terminated = False
+
+        self.last_set_results_time = snap_time
+        self._timestep_index = len(self.results.time)
+
+    @classmethod
+    def from_snapshot(cls, wn, snapshot: dict, *, global_timestep: int = 60, duration: int = 24*3600, hw_approx: bool | None = None):
+        """
+        Build a NEW simulator instance from a snapshot, starting at t=0.
+        Assumes 'snapshot' was created by extract_snapshot(scale_value=False).
+        'wn' must be a FRESH WaterNetworkModel with the same topology used to create the snapshot.
+        """
+        sim = cls(wn, hw_approx=hw_approx if hw_approx is not None else getattr(cls, "_hw_approx_default", True))
+        sim.init_simulation(global_timestep=global_timestep, duration=duration)
+
+        # 1) Force time origin to 0 (ignore snapshot's time)
+        sim._wn.sim_time = 0
+        sim._wn._prev_sim_time = -global_timestep  # so next step advances to t=global_timestep
+
+        # 2) Restore node/link state (same logic as restore_from_snapshot, but without results carry-over)
+        def _looks_scaled(node_entry):
+            for k in ('pressure', 'head'):
+                v = node_entry.get(k, None)
+                if v is None or v == -1:
+                    continue
+                if 0.0 <= float(v) <= 1.0:
+                    return True
+            return False
+
+        any_scaled = any(_looks_scaled(nd) for nd in snapshot['nodes'].values())
+        if any_scaled:
+            raise ValueError("Snapshot appears scaled. Recreate it with scale_value=False to restore exactly.")
+
+        # ---- Nodes
+        for name, nd in snapshot['nodes'].items():
+            node = sim._wn.get_node(name)
+
+            def _set_if_present(attr, key):
+                v = nd.get(key, -1)
+                if v is not None and v != -1:
+                    setattr(node, f"_{attr}", float(v))
+                    setattr(node, f"_prev_{attr}", float(v))
+
+            _set_if_present('head', 'head')
+            _set_if_present('pressure', 'pressure')
+            _set_if_present('demand', 'demand')
+            if hasattr(node, 'level'):
+                _set_if_present('level', 'level')
+
+            leak_status = nd.get('leak_status', -1)
+            if leak_status != -1:
+                leak_on = bool(leak_status)
+                node._leak_status = leak_on
+                node._leak = leak_on
+            leak_area = nd.get('leak_area', -1)
+            if leak_area != -1:
+                node._leak_area = float(leak_area)
+            leak_cd = nd.get('leak_discharge_coeff', -1)
+            if leak_cd != -1:
+                node._leak_discharge_coeff = float(leak_cd)
+
+            setting = nd.get('setting', -1)
+            if setting != -1 and hasattr(node, 'setting'):
+                try:
+                    node.setting = float(setting)
+                except Exception:
+                    setattr(node, '_setting', float(setting))
+
+        # ---- Links
+        from wntr.network.controls import LinkStatus  # ensure available
+        for name, ed in snapshot['edges'].items():
+            link = sim._wn.get_link(name)
+
+            flow = ed.get('flow', -1)
+            if flow != -1:
+                link._flow = float(flow)
+                link._prev_flow = float(flow)
+
+            status = ed.get('status', None)
+            if status is not None:
+                link.status = LinkStatus.Open if int(status) != 0 else LinkStatus.Closed
+
+            setting = ed.get('setting', -1)
+            if setting != -1 and hasattr(link, 'setting'):
+                try:
+                    link.setting = float(setting)
+                except Exception:
+                    setattr(link, '_setting', float(setting))
+
+            base_speed = ed.get('base_speed', -1)
+            if base_speed != -1 and hasattr(link, 'base_speed'):
+                link.base_speed = float(base_speed)
+
+            rough = ed.get('roughness', -1)
+            if rough != -1 and hasattr(link, 'roughness'):
+                link.roughness = float(rough)
+
+            diam = ed.get('diameter', -1)
+            if diam != -1 and hasattr(link, 'diameter'):
+                link.diameter = float(diam)
+
+        # 3) Rebuild hydraulic model & sync internals
+        import wntr
+        sim._model, sim._model_updater = wntr.sim.hydraulics.create_hydraulic_model(
+            wn=sim._wn, HW_approx=sim._hw_approx
+        )
+        sim._initialize_internal_graph()
+        sim._change_tracker.set_reference_point('graph')
+        sim._change_tracker.set_reference_point('model')
+
+        wntr.sim.hydraulics.update_network_previous_values(sim._wn)
+
+        # 4) Reset diagnostics
+        if sim.diagnostics_enabled:
+            sim.diagnostics = _Diagnostics(sim._wn, sim._model, sim.mode, enable=True)
+        else:
+            sim.diagnostics = _Diagnostics(sim._wn, sim._model, sim.mode, enable=False)
+
+        # 5) Start “as new”: clear any residual results and set cursors to 0
+        sim.results.clear()                # make sure your Results object has a clear() method; else re-init it
+        sim.last_set_results_time = 0
+        sim._timestep_index = 0
+        sim.resolve = False
+        sim._terminated = False
+
+        return sim
 
     def _calculate_b1(self):
         nodes = self._wn.node_name_list

@@ -215,6 +215,8 @@ def initialize_results_dict(wn):
     node_res['leak_demand'] = OrderedDict((name, list()) for name, obj in wn.nodes())
     node_res['expected_demand'] = OrderedDict((name, list()) for name, obj in wn.nodes())
     node_res['satisfied_demand'] = OrderedDict((name, list()) for name, obj in wn.nodes())
+    node_res['expected_leak'] = OrderedDict((name, list()) for name, obj in wn.nodes())
+    node_res['satisfied_leak'] = OrderedDict((name, list()) for name, obj in wn.nodes())
 
 
     link_res['flowrate'] = OrderedDict((name, list()) for name, obj in wn.links())
