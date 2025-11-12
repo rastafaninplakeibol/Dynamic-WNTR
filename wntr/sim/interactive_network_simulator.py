@@ -20,6 +20,12 @@ from copy import deepcopy
 import plotly.express as px
 import plotly.graph_objs as go
 import networkx as nx
+import json
+import sys
+from pathlib import Path
+import requests
+from requests.auth import HTTPBasicAuth
+
 
 
 from wntr.sim.core import _Diagnostics, _ValveSourceChecker, _solver_helper
@@ -135,7 +141,6 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
 
         logger.info('{0:<10}{1:<10}{2:<10}{3:<15}{4:<15}'.format('Sim Time', 'Trial', 'Solver', '# isolated', '# isolated'))
         logger.info('{0:<10}{1:<10}{2:<10}{3:<15}{4:<15}'.format('', '', '# iter', 'junctions', 'links'))
-
 
     def _save_expected_demand_and_leak(self):
         expected_demand = self._model.expected_demand
@@ -1066,8 +1071,9 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
 
         for node in nodes:
             for feature in nodes_features:
-                value = getattr(node, feature, -1)
+                value = getattr(node, feature, -1) 
                 if value is not None and value != -1:
+                    value = value if value > 1e-4 else 0
                     if feature not in feature_ranges:
                         feature_ranges[feature] = [value, value]
                     else:
@@ -1078,6 +1084,7 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
             for feature in edges_features:
                 value = getattr(edge, feature, -1)
                 if value is not None and value != -1:
+                    value = value if value > 1e-4 else 0
                     if feature not in feature_ranges:
                         feature_ranges[feature] = [value, value]
                     else:
@@ -1103,14 +1110,13 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
         has_feature = 0
         if value is None:
             value = -1
+        if abs(value) < 1e-5:
+            value = 0
         if feature in feature_ranges and value != -1:
             has_feature = 1
             min_val, max_val = feature_ranges[feature]
             if min_val != max_val:  # Avoid division by zero
                 value = (value - min_val) / (max_val - min_val)
-        
-        if abs(value) < 1e-5:
-            value = 0
  
         return value, has_feature
 
@@ -1153,7 +1159,6 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
         
             for feature in nodes_features:
                 value = getattr(n, feature, -1)
-                
                 scaled_value = value
                 has_feature = 0
                 if scale_values and feature not in not_scaled_features:
@@ -1191,7 +1196,7 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
             edge_data = {}
 
             for feature in edges_features:
-                value = getattr(l, feature, -1)
+                value = getattr(l, feature, -1) 
                 scaled_value, has_feature = self._scale(value, feature, feature_ranges)
                 edge_data[feature] = scaled_value
                 if feature not in edges_always_valued_features:
@@ -1257,12 +1262,10 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
         if not self.initialized_simulation:
             raise RuntimeError("Call init_simulation() before restore_from_snapshot().")
 
-        # ---- 0) Basic checks --------------------------------------------------
         if 'nodes' not in snapshot or 'edges' not in snapshot or 'time' not in snapshot:
             raise ValueError("Malformed snapshot: expected keys ['time','nodes','edges'].")
 
         def _looks_scaled(node_entry):
-            # pressure/head are good canaries; they shouldn't be in [0,1] range for a real network
             for k in ('pressure', 'head'):
                 v = node_entry.get(k, None)
                 if v is None or v == -1:
@@ -1372,18 +1375,16 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
     @classmethod
     def from_snapshot(cls, wn, snapshot: dict, *, global_timestep: int = 60, duration: int = 24*3600, hw_approx: bool | None = None):
         """
-        Build a NEW simulator instance from a snapshot, starting at t=0.
+        Build a new simulator instance from a snapshot, starting at t=0.
         Assumes 'snapshot' was created by extract_snapshot(scale_value=False).
         'wn' must be a FRESH WaterNetworkModel with the same topology used to create the snapshot.
         """
         sim = cls(wn, hw_approx=hw_approx if hw_approx is not None else getattr(cls, "_hw_approx_default", True))
         sim.init_simulation(global_timestep=global_timestep, duration=duration)
 
-        # 1) Force time origin to 0 (ignore snapshot's time)
         sim._wn.sim_time = 0
-        sim._wn._prev_sim_time = -global_timestep  # so next step advances to t=global_timestep
+        sim._wn._prev_sim_time = sim._wn.sim_time - global_timestep 
 
-        # 2) Restore node/link state (same logic as restore_from_snapshot, but without results carry-over)
         def _looks_scaled(node_entry):
             for k in ('pressure', 'head'):
                 v = node_entry.get(k, None)
@@ -1397,7 +1398,6 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
         if any_scaled:
             raise ValueError("Snapshot appears scaled. Recreate it with scale_value=False to restore exactly.")
 
-        # ---- Nodes
         for name, nd in snapshot['nodes'].items():
             node = sim._wn.get_node(name)
 
@@ -1432,8 +1432,6 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
                 except Exception:
                     setattr(node, '_setting', float(setting))
 
-        # ---- Links
-        from wntr.network.controls import LinkStatus  # ensure available
         for name, ed in snapshot['edges'].items():
             link = sim._wn.get_link(name)
 
@@ -1465,8 +1463,7 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
             if diam != -1 and hasattr(link, 'diameter'):
                 link.diameter = float(diam)
 
-        # 3) Rebuild hydraulic model & sync internals
-        import wntr
+        
         sim._model, sim._model_updater = wntr.sim.hydraulics.create_hydraulic_model(
             wn=sim._wn, HW_approx=sim._hw_approx
         )
@@ -1476,20 +1473,168 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
 
         wntr.sim.hydraulics.update_network_previous_values(sim._wn)
 
-        # 4) Reset diagnostics
         if sim.diagnostics_enabled:
             sim.diagnostics = _Diagnostics(sim._wn, sim._model, sim.mode, enable=True)
         else:
             sim.diagnostics = _Diagnostics(sim._wn, sim._model, sim.mode, enable=False)
 
-        # 5) Start “as new”: clear any residual results and set cursors to 0
-        sim.results.clear()                # make sure your Results object has a clear() method; else re-init it
+        sim.results = wntr.sim.results.SimulationResults()
+        sim.results.error_code = None
+        sim.results.time = []
+        sim.results.network_name = sim._wn.name
+        sim.results.node = {}
+        sim.results.link = {}
         sim.last_set_results_time = 0
         sim._timestep_index = 0
         sim.resolve = False
         sim._terminated = False
-
         return sim
+
+    def build_twin_from_snapshot(self, open_twins_url: str, user:str, passwd: str, thing_id: str) -> dict:
+        """Build full twin payload (static + dynamic) from a snapshot."""
+        
+        snap = self.extract_snapshot()
+
+        nodes = snap.get("nodes", {})
+        edges = snap.get("edges", {})
+
+        payload = {
+            "thingId": thing_id,
+            "attributes": {
+                "type": "water_network",
+                "time": snap.get("time", 0),
+                "note": "Digital twin built from simulation snapshot"
+            },
+            "features": {
+                "static": {
+                    "properties": {
+                        "counts": {"nodes": len(nodes), "edges": len(edges)},
+                        "tags": ["snapshot", "auto-import"]
+                    }
+                },
+                "children": {"properties": {}}
+            }
+        }
+
+        for nid, ndata in nodes.items():
+            payload["features"]["children"]["properties"][nid] = {
+                "type": "node",
+                "node_type": ndata.get("node_type"),
+                "features": {
+                    "static": {
+                        "properties": {
+                            "elevation": ndata.get("elevation", -1),
+                            "min_level": ndata.get("min_level", -1),
+                            "max_level": ndata.get("max_level", -1)
+                        }
+                    },
+                    "dynamic": {
+                        "properties": {
+                            "head": ndata.get("head", -1),
+                            "pressure": ndata.get("pressure", -1),
+                            "demand": ndata.get("demand", -1),
+                            "leak_area": ndata.get("leak_area", -1),
+                            "leak_demand": ndata.get("leak_demand", -1),
+                            "expected_demand": ndata.get("expected_demand", -1),
+                            "satisfied_demand": ndata.get("satisfied_demand", -1),
+                            "expected_leak": ndata.get("expected_leak", -1),
+                            "satisfied_leak": ndata.get("satisfied_leak", -1),
+                            "setting": ndata.get("setting", -1)
+                        }
+                    }
+                }
+            }
+
+        for eid, edata in edges.items():
+            payload["features"]["children"]["properties"][eid] = {
+                "type": "edge",
+                "link_type": edata.get("link_type"),
+                "start": edata.get("start"),
+                "end": edata.get("end"),
+                "features": {
+                    "static": {
+                        "properties": {
+                            "diameter": edata.get("diameter", -1),
+                            "roughness": edata.get("roughness", -1)
+                        }
+                    },
+                    "dynamic": {
+                        "properties": {
+                            "flow": edata.get("flow", -1),
+                            "velocity": edata.get("velocity", -1),
+                            "headloss": edata.get("headloss", -1),
+                            "status": edata.get("status", -1),
+                            "setting": edata.get("setting", -1)
+                        }
+                    }
+                }
+            }
+
+        url = f"{open_twins_url}/things/{payload['thingId']}"
+        r = requests.put(
+            url,
+            auth=HTTPBasicAuth(user, passwd),
+            headers={"Content-Type": "application/json"},
+            data=json.dumps(payload)
+        )
+        if r.status_code not in (200, 201, 204):
+            raise RuntimeError(f"PUT {url} -> {r.status_code}: {r.text}")
+        return r.status_code
+
+    def update_twin(self, open_twins_url: str, user: str, pwd: str, thing_id: str):
+        """Update only the dynamic features (state) of each node/edge in Ditto."""
+        
+        snap = self.extract_snapshot()
+
+        nodes = snap.get("nodes", {})
+        edges = snap.get("edges", {})
+
+        for entity_id, node_data in nodes.items():
+            dynamic_payload = {
+                "properties": {
+                    "head": node_data.get("head", -1),
+                    "pressure": node_data.get("pressure", -1),
+                    "demand": node_data.get("demand", -1),
+                    "leak_area": node_data.get("leak_area", -1),
+                    "leak_demand": node_data.get("leak_demand", -1),
+                    "expected_demand": node_data.get("expected_demand", -1),
+                    "satisfied_demand": node_data.get("satisfied_demand", -1),
+                    "expected_leak": node_data.get("expected_leak", -1),
+                    "satisfied_leak": node_data.get("satisfied_leak", -1),
+                    "setting": node_data.get("setting", -1)
+                }
+            }
+            url = f"{open_twins_url}/things/{thing_id}/features/children/properties/{entity_id}/features/dynamic"
+            r = requests.put(
+                url,
+                auth=HTTPBasicAuth(user, pwd),
+                headers={"Content-Type": "application/json"},
+                data=json.dumps(dynamic_payload)
+            )
+            if r.status_code not in (200, 201, 204):
+                print(f"Failed node {entity_id}: {r.status_code} {r.text}")
+
+        for entity_id, edge_data in edges.items():
+            dynamic_payload = {
+                "properties": {
+                    "flow": edge_data.get("flow", -1),
+                    "velocity": edge_data.get("velocity", -1),
+                    "headloss": edge_data.get("headloss", -1),
+                    "status": edge_data.get("status", -1),
+                    "setting": edge_data.get("setting", -1)
+                }
+            }
+            url = f"{open_twins_url}/things/{thing_id}/features/children/properties/{entity_id}/features/dynamic"
+            r = requests.put(
+                url,
+                auth=HTTPBasicAuth(user, pwd),
+                headers={"Content-Type": "application/json"},
+                data=json.dumps(dynamic_payload)
+            )
+            if r.status_code not in (200, 201, 204):
+                print(f"Failed edge {entity_id}: {r.status_code} {r.text}")
+
+        print("Dynamic features updated.")
 
     def _calculate_b1(self):
         nodes = self._wn.node_name_list
