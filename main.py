@@ -3,7 +3,12 @@ import sys
 import time
 
 import wntr
-from wntr.sim.interactive_network_simulator import DynWNTRSimulator
+from wntr.sim.interactive_network_simulator import InteractiveWNTRSimulator
+from wntr.sim.core import WNTRSimulator
+import warnings
+warnings.filterwarnings("ignore")
+from wntr.network import LinkStatus
+
 
 def create_water_network_model():
     # 1. Create a new water network model
@@ -150,10 +155,10 @@ def random_simulation_test():
         #wn.reset_initial_values()
         wn = create_water_network_model()
         #wn.add_pattern('house1_pattern', DynWNTRSimulator.expand_pattern_to_simulation_duration([1,5,1], global_timestep, simulation_duration=one_day_in_seconds))
-        wn.add_pattern('ptn_1', DynWNTRSimulator.expand_pattern_to_simulation_duration([1,3,5,3,1], global_timestep, simulation_duration=one_day_in_seconds))
+        wn.add_pattern('ptn_1', InteractiveWNTRSimulator.expand_pattern_to_simulation_duration([1,3,5,3,1], global_timestep, simulation_duration=one_day_in_seconds))
         #sys.exit()
 
-        sim = DynWNTRSimulator(wn)
+        sim = InteractiveWNTRSimulator(wn)
         sim.init_simulation(duration=one_day_in_seconds, global_timestep=global_timestep)
 
         #branched_sim_1 = None
@@ -462,7 +467,7 @@ def custom_complex_water_model():
 
 
     # Save network file (optional)
-    wntr.network.io.write_inpfile(wn, 'custom_wdn.inp')
+    wntr.network.io.write_inpfile(wn, r"C:\Users\marco\Desktop\Università\reinforce\Dynamic-WNTR\10x10.inp")
 
     # You can simulate or visualize now:
     wntr.graphics.plot_network(wn, filename='custom_wdn.png')
@@ -473,19 +478,242 @@ def custom_complex_water_model():
 def main():
 
     one_day_in_seconds = 86400
-    global_timestep = 300
+    global_timestep = 60
     #wn = custom_complex_water_model() 
-    wn = wntr.network.WaterNetworkModel("custom_wdn.inp")
-    wn.add_pattern('gauss_pattern_1', DynWNTRSimulator.expand_pattern_to_simulation_duration([1, 2, 4, 7, 10, 7, 4, 2, 1, 0.5], global_timestep, simulation_duration=one_day_in_seconds))
-    wn.add_pattern('gauss_pattern_2', DynWNTRSimulator.expand_pattern_to_simulation_duration([1, 0.5, 1, 2, 4, 7, 10, 7, 4, 2], global_timestep, simulation_duration=one_day_in_seconds))
-    wn.add_pattern('gauss_pattern_3', DynWNTRSimulator.expand_pattern_to_simulation_duration([4, 2, 1, 0.5, 1, 2, 4, 7, 10, 7], global_timestep, simulation_duration=one_day_in_seconds))
-    wn.add_pattern('gauss_pattern_4', DynWNTRSimulator.expand_pattern_to_simulation_duration([10, 7, 4, 2, 1, 0.5, 1, 2, 4, 7], global_timestep, simulation_duration=one_day_in_seconds))
-    wn.add_pattern('gauss_pattern_5', DynWNTRSimulator.expand_pattern_to_simulation_duration([7, 10, 7, 4, 2, 1, 0.5, 1, 2, 4], global_timestep, simulation_duration=one_day_in_seconds))
+    selected_grid = r"C:\Users\marco\Desktop\projects\reinforce\Dynamic-WNTR\10x10.inp"
 
-    sim = DynWNTRSimulator(wn)
-    sim.init_simulation(duration=one_day_in_seconds, global_timestep=global_timestep) 
+    wn = wntr.network.WaterNetworkModel(selected_grid)
 
-    sim.plot_network()
+    wn.add_pattern('gauss_pattern_1', InteractiveWNTRSimulator.expand_pattern_to_simulation_duration([1, 2, 4, 7, 10, 7, 4, 2, 1, 0.5], global_timestep, simulation_duration=one_day_in_seconds))
+    wn.add_pattern('gauss_pattern_2', InteractiveWNTRSimulator.expand_pattern_to_simulation_duration([1, 0.5, 1, 2, 4, 7, 10, 7, 4, 2], global_timestep, simulation_duration=one_day_in_seconds))
+    wn.add_pattern('gauss_pattern_3', InteractiveWNTRSimulator.expand_pattern_to_simulation_duration([4, 2, 1, 0.5, 1, 2, 4, 7, 10, 7], global_timestep, simulation_duration=one_day_in_seconds))
+    wn.add_pattern('gauss_pattern_4', InteractiveWNTRSimulator.expand_pattern_to_simulation_duration([10, 7, 4, 2, 1, 0.5, 1, 2, 4, 7], global_timestep, simulation_duration=one_day_in_seconds))
+    wn.add_pattern('gauss_pattern_5', InteractiveWNTRSimulator.expand_pattern_to_simulation_duration([7, 10, 7, 4, 2, 1, 0.5, 1, 2, 4], global_timestep, simulation_duration=one_day_in_seconds))
+
+    wn.options.hydraulic.demand_model = 'PDD'  # Pressure-driven demand
+
+    wn.options.time.hydraulic_timestep = global_timestep
+    wn.options.time.pattern_timestep = global_timestep 
+    wn.options.time.rule_timestep = global_timestep
+    wn.options.time.report_timestep = global_timestep
+    wn.options.time.quality_timestep = global_timestep
+    wn.options.time.duration = one_day_in_seconds
+
+    # subito dopo aver caricato wn e impostato le options
+    print("Nodi:", len(wn.node_name_list), "Giunzioni:", len(wn.junction_name_list), "Link:", len(wn.link_name_list))
+    print("Duration:", wn.options.time.duration, 
+        "Hyd dt:", wn.options.time.hydraulic_timestep)
+
+    if len(wn.node_name_list) == 0 or len(wn.link_name_list) == 0:
+        raise RuntimeError("La rete importata è vuota: controlla il file INP e i percorsi.")
+
+
+
+    times_pipeclose_wntr = []
+    times_pipeclose_dyn = []
+    times_junction_wntr = []
+    times_junction_dyn = []
+    for n in range(5, 91, 5):
+
+        pipe_list = wn.pipe_name_list[0:n]   
+        junction_list = wn.junction_name_list[0:n]
+        print(f"\n--- Benchmarking with first {n} pipes and junctions --- \n")
+
+    
+       # pipe_list = wn.pipe_name_list[0:5]   
+
+
+       # junction_list = wn.junction_name_list[0:5]
+
+        start_time = time.time()
+
+        start_times = []
+        end_times = []
+
+        res = None
+
+        
+        # # WNTR
+        # for junction_name in junction_list:
+
+
+        #     wn =  wntr.network.WaterNetworkModel(selected_grid)
+        #     wn.options.hydraulic.demand_model = 'PDD'
+        #     wn.options.time.hydraulic_timestep = global_timestep
+        #     wn.options.time.duration = one_day_in_seconds
+
+
+        #     if junction_name.startswith('J'):
+        #         start_times.append(time.time())
+        #         wn.get_node(junction_name).add_leak(wn, 0.1, start_time=0)
+        #         wn.sim_time = 0
+        #         #wn.reset_initial_values()   # <<< 
+        #         sim = WNTRSimulator(wn)    
+        #         res = sim.run_sim()
+        #         end_times.append(time.time())
+
+        # WNTR
+        #for junction_name in junction_list:
+        for i in range(len(junction_list)):
+
+            wn =  wntr.network.WaterNetworkModel(selected_grid)
+            wn.options.hydraulic.demand_model = 'PDD'
+            wn.options.time.hydraulic_timestep = global_timestep
+            wn.options.time.duration = one_day_in_seconds
+
+            for j in range(i):
+                junction_name = junction_list[j]
+
+                if junction_name.startswith('J'):
+                    start_times.append(time.time())
+                    wn.get_node(junction_name).add_leak(wn, 0.1, start_time=0)
+            
+            wn.sim_time = 0
+            #wn.reset_initial_values()   # <<< 
+            sim = WNTRSimulator(wn)    
+            res = sim.run_sim()
+            end_times.append(time.time())
+
+
+                
+        print("Leak addition and simulation times for each junction:")
+        for i, junction_name in enumerate(junction_list):
+            elapsed_time = end_times[i] - start_times[i]
+            print(f"Junction: {junction_name}, Time taken: {elapsed_time:.4f} seconds")
+        
+        print(f"Total time for all simulations: {time.time() - start_time:.4f} seconds")
+        #total_junction_wntr = time.time() - start_time
+        #print(f"Total time for all pipe-close simulations (WNTR): {total_junction_wntr:.4f} seconds")
+        #times_junction_wntr.append(total_junction_wntr)
+
+        
+
+        # DYN-WNTR
+        wn =  wntr.network.WaterNetworkModel(selected_grid)
+        sim = InteractiveWNTRSimulator(wn)
+        sim.init_simulation(global_timestep=global_timestep, duration=one_day_in_seconds)
+        wn.sim_time = 0
+
+
+        start = time.time()
+
+        for junction_name in junction_list:
+            if junction_name.startswith('J'):
+                sim.start_leak(junction_name, 0.1)
+                sim.step_sim()
+
+        while not sim.is_terminated():
+            sim.step_sim()
+        
+        end = time.time()
+
+        results = sim.get_results()
+        #print(f"Total time for leak additions in interactive simulator: {end - start:.4f} seconds")
+        total_junction_dyn = end - start
+        print(f"Total time for leak additions in interactive simulator (DYN-WNTR): {total_junction_dyn:.4f} seconds")
+        times_junction_dyn.append(total_junction_dyn)
+
+
+
+
+        # =========================================================
+        
+
+        # WNTR
+        wn = wntr.network.WaterNetworkModel(selected_grid)
+        wn.options.hydraulic.demand_model = 'PDD'
+        wn.options.time.hydraulic_timestep = global_timestep
+        wn.options.time.duration = one_day_in_seconds
+
+
+        start_time = time.time()
+        start_times = []
+        end_times = []
+        res = None
+
+        for pipe_name in pipe_list:
+
+            wn =  wntr.network.WaterNetworkModel(selected_grid)
+            wn.options.hydraulic.demand_model = 'PDD'
+            wn.options.time.hydraulic_timestep = global_timestep
+            wn.options.time.duration = one_day_in_seconds
+
+            start_times.append(time.time())
+            wn.get_link(pipe_name).status = LinkStatus.Closed
+            wn.sim_time = 0
+            sim = WNTRSimulator(wn)
+            res = sim.run_sim()
+            end_times.append(time.time())
+            wn.get_link(pipe_name).status = LinkStatus.Open
+
+        print("\n[PIPE CLOSE] Closing pipes and simulation times (WNTR):")
+        for i, pipe_name in enumerate(pipe_list):
+            elapsed_time = end_times[i] - start_times[i]
+            print(f"Pipe: {pipe_name}, Time taken: {elapsed_time:.4f} seconds")
+        
+        #print(f"Total time for all pipe-close simulations (WNTR): {time.time() - start_time:.4f} seconds")
+        total_pipeclose_wntr = time.time() - start_time
+        print(f"Total time for all pipe-close simulations (WNTR): {total_pipeclose_wntr:.4f} seconds")
+        times_pipeclose_wntr.append(total_pipeclose_wntr)
+
+
+
+        # DYN-WNTR
+        wn =  wntr.network.WaterNetworkModel(selected_grid)
+        wn.options.hydraulic.demand_model = 'PDD'
+        wn.options.time.hydraulic_timestep = global_timestep
+        wn.options.time.duration = one_day_in_seconds
+
+        sim = InteractiveWNTRSimulator(wn)
+        sim.init_simulation(global_timestep=global_timestep, duration=one_day_in_seconds)
+
+        start = time.time()
+        for pipe_name in pipe_list:
+            sim._close_link(pipe_name)   
+
+        while not sim.is_terminated():
+            sim.step_sim()
+
+        end = time.time()
+
+        results = sim.get_results()
+        #print(f"Total time for pipe closures in interactive simulator (DYN-WNTR): {end - start:.4f} seconds")
+
+        total_pipeclose_dyn = end - start
+        print(f"Total time for pipe closures in interactive simulator (DYN-WNTR): {total_pipeclose_dyn:.4f} seconds")
+        times_pipeclose_dyn.append(total_pipeclose_dyn)
+
+
+    # print("\n================ RISULTATI FINALI ================")
+    # print("Vector – Total time for all junction simulations (WNTR):")
+    # print(times_junction_wntr)
+
+    # print("\nVector – Total time for leak additions (DYN-WNTR):")
+    # print(times_junction_dyn)
+
+    # print("\nVector – Total time for all pipe-close simulations (WNTR):")
+    # print(times_pipeclose_wntr)
+
+    # print("\nVector – Total time for pipe closures (DYN-WNTR):")
+    # print(times_pipeclose_dyn)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    #print(results.node['pressure'])
     return
 
     start = time.time()

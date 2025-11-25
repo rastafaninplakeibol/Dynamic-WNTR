@@ -307,9 +307,16 @@ def get_results(wn, results, node_res, link_res):
     node_names = wn.junction_name_list + wn.tank_name_list + wn.reservoir_name_list
     link_names = wn.pipe_name_list + wn.head_pump_name_list + wn.power_pump_name_list + wn.valve_name_list
 
+
+
     for key, value in node_res.items():
-        node_res[key] = pd.DataFrame(data=np.array([node_res[key][name] for name in node_names]).transpose(), index=results.time,
-                                     columns=node_names)
+        if key == 'satisfied_demand' or key == 'expected_demand'or key == 'satisfied_leak' or key == 'expected_leak':
+            continue
+
+    #for key, value in node_res.items():
+    #    node_res[key] = pd.DataFrame(data=np.array([node_res[key][name] for name in node_names]).transpose(), index=results.time,
+     #                                columns=node_names)
+
     results.node = node_res
 
     for key, value in link_res.items():

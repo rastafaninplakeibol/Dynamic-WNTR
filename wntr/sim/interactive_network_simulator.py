@@ -258,6 +258,7 @@ class InteractiveWNTRSimulator(wntr.sim.WNTRSimulator):
                 self.rebuild_hydraulic_model = False
                 
             # Prepare for solve
+            self._update_internal_graph()
             isolated_junctions, isolated_links = self._get_isolated_junctions_and_links()
             num_isolated_junctions, num_isolated_links = len(isolated_junctions), len(isolated_links)
             if not first_step and not self.resolve:
